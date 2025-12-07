@@ -2,6 +2,7 @@ import Funciones as f
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.express as px
 #primero hago lo que se pide de laws dos estategias
 #regiones del mundo y sectores de estados unidos, ademas tengo los benchmarks
 
