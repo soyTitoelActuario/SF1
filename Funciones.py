@@ -31,8 +31,17 @@ def calcular_metricas(df):
     normalized_prices = df / df.iloc[0] * 100
     return returns, cumulative_returns, normalized_prices
 
-def calcular_rendimientos_portafolio(returns, weights):
-    return (returns * weights).sum(axis=1)
+def calcular_rendimientos_portafolio(returns, weights, tickers=None):
+    if isinstance(weights, pd.Series):
+        w = weights
+    else:
+        if tickers is None:
+            raise ValueError(
+                "Si weights no es pd.Series, debes pasar tickers para alinear"
+            )
+        w = pd.Series(weights, index=tickers)
+    w = w.reindex(returns.columns).fillna(0.0)
+    return (returns * w).sum(axis=1)
 
 def calcular_rendimiento_ventana(returns, window):
     if len(returns) < window:
@@ -341,3 +350,101 @@ def markowitz_rendimiento_objetivo(expected_returns, cov_matrix, target_return):
         raise ValueError(f"No se pudo encontrar un portafolio con rendimiento >= {target_return:.2%}")
     
     return result.x, portfolio_performance(result.x)
+
+def market_implied_prior_returns( market_caps,risk_aversion,cov_matrix,risk_free_rate=0.0):
+    """
+    Calcula los retornos implícitos de equilibrio del mercado (π).
+
+    Fórmula:
+        π = δ · Σ · w_mkt + r_f
+
+    donde:
+        δ  = coeficiente de aversión al riesgo
+        Σ  = matriz de covarianza
+        w_mkt = pesos de mercado (capitalización relativa)
+
+    Estos retornos representan el "prior" del modelo Black–Litterman.
+    """
+    mcaps = pd.Series(market_caps)
+    if isinstance(cov_matrix, pd.DataFrame):
+        mcaps = mcaps.reindex(cov_matrix.columns)
+        if mcaps.isna().any():
+            raise ValueError("market_caps no coincide con los activos del universo")
+        Sigma = cov_matrix
+    else:
+        Sigma = pd.DataFrame(cov_matrix, index=mcaps.index, columns=mcaps.index)
+    # Pesos de mercado
+    w_mkt = mcaps / mcaps.sum()
+    pi = risk_aversion * Sigma.dot(w_mkt) + risk_free_rate
+    return pi
+ 
+def parse_absolute_views(tickers, absolute_views):
+    """
+    Convierte views absolutas en matrices P y Q.
+
+    Ejemplo:
+        absolute_views = {"AAPL": 0.12, "MSFT": 0.10}
+
+    Significa:
+        E[R_AAPL] = 12%
+        E[R_MSFT] = 10%
+    """
+    tickers = list(tickers)
+    K = len(absolute_views)
+    N = len(tickers)
+    P = np.zeros((K, N))
+    Q = np.zeros((K, 1))
+    for i, (asset, view_return) in enumerate(absolute_views.items()):
+        idx = tickers.index(asset)
+        P[i, idx] = 1.0
+        Q[i, 0] = view_return
+
+    return P, Q
+
+def default_omega(cov_matrix, P, tau):
+    """
+    Construye la matriz Omega usando el método de He–Litterman.
+
+    Omega_k = tau · Var(view_k)
+
+    Es decir, la incertidumbre de cada view es proporcional
+    a la varianza del portafolio asociado a esa view.
+    """
+
+    return np.diag(np.diag(tau * P @ cov_matrix @ P.T))
+
+def black_litterman_returns(cov_matrix,pi,P,Q,omega=None,tau=0.05):
+    """
+    Calcula los retornos posteriores Black–Litterman (μ_BL).
+
+    Fórmula:
+    """
+
+    # Normalización de tipos
+    if isinstance(cov_matrix, pd.DataFrame):
+        Sigma = cov_matrix.values
+        tickers = cov_matrix.columns
+    else:
+        Sigma = cov_matrix
+        tickers = None
+
+    pi = np.asarray(pi).reshape(-1, 1)
+    Q = np.asarray(Q).reshape(-1, 1)
+
+    if omega is None:
+        omega = default_omega(Sigma, P, tau)
+
+    # Componentes intermedios
+    tauSigma = tau * Sigma
+    tauSigma_Pt = tauSigma @ P.T
+    A = P @ tauSigma_Pt + omega
+    b = Q - P @ pi
+
+    # Resolver sistema lineal
+    x = np.linalg.solve(A, b)
+    mu_bl = pi + tauSigma_Pt @ x
+
+    if tickers is not None:
+        return pd.Series(mu_bl.flatten(), index=tickers)
+    return mu_bl.flatten()
+
