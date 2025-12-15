@@ -104,14 +104,18 @@ with tab1:
     # Obtener datos del portafolio del usuario
     datos_portafolio = f.obtener_datos_acciones(simbolos, start_date, end_date)
     returns_portafolio, cumulative_returns_portafolio, normalized_prices_portafolio = f.calcular_metricas(datos_portafolio)
-    portfolio_returns = f.calcular_rendimientos_portafolio(returns_portafolio, pesos)
+    portfolio_returns = f.calcular_rendimientos_portafolio( returns_portafolio, pesos, tickers=simbolos)
 
     # Obtener datos del benchmark
     benchmark_tickers = list(benchmark.keys())
     benchmark_weights = [v/100 for v in benchmark.values()]  # Convertir de % a decimal
     datos_benchmark = f.obtener_datos_acciones(benchmark_tickers, start_date, end_date)
     returns_benchmark, cumulative_returns_benchmark, normalized_prices_benchmark = f.calcular_metricas(datos_benchmark)
-    benchmark_returns = f.calcular_rendimientos_portafolio(returns_benchmark, benchmark_weights)
+    benchmark_returns =benchmark_returns = f.calcular_rendimientos_portafolio(
+    returns_benchmark,
+    benchmark_weights,
+    tickers=benchmark_tickers
+)
     cum_ret_port = (1 + portfolio_returns).cumprod()
     var_95_port, cvar_95_port = f.calcular_var_cvar(portfolio_returns)
     calmar_port = f.calmar_ratio(portfolio_returns) # Devuelve una tupla o float? Tu funcion devuelve (calmar, cagr) o solo calmar? 
@@ -221,7 +225,8 @@ with tab2:
         
         tipo_optimizacion = st.radio(
             "Seleccione objetivo:",
-            ["Mínima Varianza", "Máximo Sharpe", "Rendimiento Objetivo"]
+            ["Mínima Varianza", "Máximo Sharpe", "Rendimiento Objetivo"],
+            key="optimizacion_tab2"
         )
         
         rendimiento_objetivo = None
@@ -301,4 +306,228 @@ with tab2:
             st.info("👈 Selecciona un método y haz clic en 'Calcular' para ver la propuesta óptima.")
 
 with tab3:
-    st.title("Proximamante...")
+    st.subheader("🧠 Black–Litterman Portfolio Optimization")
+
+    st.caption(
+        "El modelo Black–Litterman combina el equilibrio de mercado con opiniones subjetivas "
+        "para generar retornos esperados más estables y consistentes."
+    )
+    datos_bl = f.obtener_datos_acciones(simbolos, start_date, end_date)
+    def calcular_expected_returns_geometrico(prices):
+        n = len(prices)
+        total_return = prices.iloc[-1] / prices.iloc[0]
+        n_periods = n / 252
+        return total_return ** (1 / n_periods) - 1
+
+    expected_returns_ref = calcular_expected_returns_geometrico(datos_bl)[simbolos]
+
+    returns_bl = datos_bl.pct_change().dropna()
+    cov_matrix = returns_bl.cov() * 252
+    cov_matrix = cov_matrix.loc[simbolos, simbolos]
+
+    col_conf, col_res = st.columns([1, 2])
+
+    # ============================================================
+    # 2. CONFIGURACIÓN BLACK–LITTERMAN
+    # ============================================================
+    with col_conf:
+        st.markdown("##### Configuración Black–Litterman")
+
+        st.info(
+            "💡 Si no ingresas views, el modelo colapsa al equilibrio de mercado "
+            "(similar a un CAPM implícito)."
+        )
+
+        # ---- Tau ----
+        tau = st.slider(
+            "Tau (incertidumbre del prior)",
+            min_value=0.01,
+            max_value=0.20,
+            value=0.05,
+            step=0.01,
+            help=(
+                "Controla cuánto confías en el equilibrio de mercado.\n\n"
+                "• Valores bajos (≈0.02–0.05): alta confianza en el mercado.\n"
+                "• Valores altos: mayor peso a las views.\n\n"
+                "En la práctica institucional suele fijarse entre 0.025 y 0.05."
+            )
+        )
+
+        # ---- Aversión al riesgo ----
+        risk_aversion = st.slider(
+            "Aversión al riesgo del mercado (λ)",
+            min_value=0.5,
+            max_value=5.0,
+            value=2.5,
+            step=0.1,
+            help=(
+                "Parámetro que penaliza el riesgo en el equilibrio de mercado.\n\n"
+                "• Valores altos ⇒ mercado más adverso al riesgo.\n"
+                "• Valores bajos ⇒ mercado más agresivo.\n\n"
+                "Valores típicos para renta variable: 2–3."
+            )
+        )
+
+        # ---- Risk-free ----
+        risk_free_rate = st.number_input(
+            "Tasa libre de riesgo",
+            min_value=0.0,
+            max_value=0.10,
+            value=0.02,
+            step=0.005,
+            format="%.3f",
+            help=(
+                "Tasa libre de riesgo anualizada (ej. bonos del Tesoro).\n\n"
+                "Debe ser consistente con la frecuencia de la covarianza (anual)."
+            )
+        )
+
+        # ========================================================
+        # 3. VIEWS ABSOLUTAS
+        # ========================================================
+        st.markdown("##### Views Absolutas (opcional)")
+
+        st.caption(
+            "Las views representan expectativas explícitas del inversionista sobre "
+            "el rendimiento anual de un activo."
+        )
+
+        absolute_views = {}
+        for ticker in simbolos:
+            view = st.number_input(
+                f"{ticker} – retorno esperado anual",
+                min_value=-1.0,
+                max_value=1.0,
+                value=0.0,
+                step=0.01,
+                format="%.2f",
+                help=(
+                    "Ejemplo: 0.08 significa que esperas un rendimiento anual del 8%.\n\n"
+                    "Si no tienes una opinión clara, deja el valor en 0."
+                )
+            )
+            if view != 0.0:
+                absolute_views[ticker] = view
+
+        # ========================================================
+        # 4. OPTIMIZACIÓN FINAL
+        # ========================================================
+        st.markdown("##### Optimización Final")
+
+        tipo_optimizacion = st.radio(
+            "Seleccione objetivo:",
+            ["Mínima Varianza", "Máximo Sharpe", "Rendimiento Objetivo"],
+            key="optimizacion_tab3",
+            help=(
+                "• Mínima Varianza: portafolio más estable.\n"
+                "• Máximo Sharpe: mejor retorno ajustado por riesgo.\n"
+                "• Rendimiento Objetivo: mínimo retorno deseado con riesgo mínimo."
+            )
+        )
+
+        rendimiento_objetivo = None
+        if tipo_optimizacion == "Rendimiento Objetivo":
+            rendimiento_objetivo = st.number_input(
+                "Rendimiento anual deseado",
+                min_value=0.0,
+                max_value=2.0,
+                value=0.15,
+                step=0.01,
+                format="%.2f",
+                help="Retorno anual mínimo que debe alcanzar el portafolio."
+            )
+
+        boton_bl = st.button(
+            "⚡ Ejecutar Black–Litterman",
+            use_container_width=True,
+            help="Calcula los retornos Black–Litterman y optimiza el portafolio."
+        )
+
+    # ============================================================
+    # 5. RESULTADOS
+    # ============================================================
+    with col_res:
+        if boton_bl:
+            with st.spinner("Calculando Black–Litterman y optimización..."):
+                try:
+                    market_caps = {s: 1.0 for s in simbolos}
+
+                    pi = f.market_implied_prior_returns(
+                        market_caps=market_caps,
+                        risk_aversion=risk_aversion,
+                        cov_matrix=cov_matrix,
+                        risk_free_rate=risk_free_rate
+                    )
+
+                    if len(absolute_views) > 0:
+                        P, Q = f.parse_absolute_views(simbolos, absolute_views)
+                    else:
+                        P = np.zeros((0, len(simbolos)))
+                        Q = np.zeros((0, 1))
+
+                    mu_bl = f.black_litterman_returns(
+                        cov_matrix=cov_matrix,
+                        pi=pi,
+                        P=P,
+                        Q=Q,
+                        tau=tau
+                    )
+
+                    if tipo_optimizacion == "Mínima Varianza":
+                        pesos_opt, (ret_opt, vol_opt) = f.minima_varianza(
+                            mu_bl.values, cov_matrix.values
+                        )
+                    elif tipo_optimizacion == "Máximo Sharpe":
+                        pesos_opt, (ret_opt, vol_opt) = f.maximo_sharpe(
+                            mu_bl.values, cov_matrix.values, risk_free=risk_free_rate
+                        )
+                    else:
+                        pesos_opt, (ret_opt, vol_opt) = f.markowitz_rendimiento_objetivo(
+                            mu_bl.values, cov_matrix.values, rendimiento_objetivo
+                        )
+
+                    st.success("✅ Black–Litterman ejecutado con éxito")
+
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Rendimiento Esperado", f"{ret_opt:.2%}")
+                    c2.metric("Volatilidad Esperada", f"{vol_opt:.2%}")
+                    c3.metric("Sharpe Ratio", f"{(ret_opt/vol_opt):.2f}")
+
+                    df_pesos = pd.DataFrame({
+                        "Ticker": simbolos,
+                        "Peso (%)": pesos_opt * 100,
+                        "Retorno BL": mu_bl.values
+                    }).sort_values("Peso (%)", ascending=False)
+
+                    df_pesos = df_pesos[df_pesos["Peso (%)"] > 0.01]
+
+                    col_tabla, col_graf = st.columns([1, 1])
+
+                    with col_tabla:
+                        st.markdown("###### Asignación Óptima (Black–Litterman)")
+                        st.dataframe(
+                            df_pesos.style
+                            .format({"Peso (%)": "{:.2f}%", "Retorno BL": "{:.2%}"})
+                            .background_gradient(cmap="Blues"),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+
+                    with col_graf:
+                        import plotly.express as px
+                        fig = px.pie(
+                            df_pesos,
+                            values="Peso (%)",
+                            names="Ticker",
+                            title="Distribución Óptima BL",
+                            hole=0.4
+                        )
+                        fig.update_layout(height=300, margin=dict(t=30, b=0, l=0, r=0))
+                        st.plotly_chart(fig, use_container_width=True)
+
+                except Exception as e:
+                    st.error(f"⚠️ Error en Black–Litterman: {str(e)}")
+                    st.info("Revisa las views o ajusta tau / aversión al riesgo.")
+        else:
+            st.info("👈 Configura el modelo y ejecuta Black–Litterman.")
+
